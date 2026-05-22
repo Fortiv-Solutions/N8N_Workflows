@@ -1,0 +1,1980 @@
+{
+  "name": "CV Evaluation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "Manual-cv-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "522684aa-0a80-4449-8ec5-b38143805d4a",
+      "name": "Webhook - Manual CV Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -864,
+        112
+      ],
+      "webhookId": "manual-cv-intake-001",
+      "notes": "Receives POST with multipart/form-data. Expects binary cv_file + body.data JSON string."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Parse Webhook Body ───────────────────────────────────────────────\nconst item = $input.first();\n\n// body.data comes as a nested JSON string\nconst rawData = item.json.body?.data || item.json.body || item.json;\n\nlet data;\ntry {\n  data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;\n} catch (e) {\n  throw new Error(`Failed to parse body.data: ${e.message}`);\n}\n\nconst project  = data.project             || {};\nconst fileInfo = data.file_info           || {};\nconst metadata = data.metadata            || {};\nconst criteria = data.evaluation_criteria || {};\n\n// ── Validate ──\nif (!project.id)           throw new Error('Missing required field: project.id');\nif (!fileInfo.file_name)   throw new Error('Missing required field: file_info.file_name');\nif (!item.binary?.cv_file) throw new Error('Missing CV file binary data');\n\n// ── Build storage path (same pattern as WF1) ──\nconst now      = new Date();\nconst year     = now.getFullYear();\nconst month    = String(now.getMonth() + 1).padStart(2, '0');\nconst ts       = now.getTime();\nconst safeName = fileInfo.file_name.replace(/[^a-zA-Z0-9._-]/g, '_');\nconst mimeType = fileInfo.file_type || 'application/pdf';\nconst storageKey = `cv-files/manual/${year}/${month}/manual_${ts}_${safeName}`;\n\nreturn [{\n  json: {\n    // ── Project / Job info ──\n    hiring_project_id:     project.id,\n    job_title:                 project.title                     || 'Unknown Position',\n    department:                project.department                || '',\n    location:                  project.location                  || '',\n    job_type:                  project.job_type                  || '',\n    required_skills:           JSON.stringify(project.required_skills || []),\n    required_experience_years: project.required_experience_years || 0,\n    required_education:        project.required_education         || '',\n    job_description:           project.description               || '',\n    job_status:                project.status                    || 'Active',\n\n    // ── File info ──\n    original_filename: fileInfo.file_name,\n    file_size:         fileInfo.file_size   || 0,\n    mime_type:         mimeType,\n    file_uploaded_at:  fileInfo.uploaded_at || now.toISOString(),\n\n    // ── Metadata ──\n    source_platform: metadata.source_platform || 'Manual',\n    uploaded_at:     metadata.uploaded_at     || now.toISOString(),\n    criteria_set_id: metadata.criteria_set_id || null,\n\n    // ── Evaluation criteria ──\n    criteria_id:          criteria.id          || null,\n    criteria_name:        criteria.name        || null,\n    criteria_description: criteria.description || null,\n    criteria_items:       JSON.stringify(criteria.items || []),\n\n    // ── Storage ──\n    storage_key: storageKey,\n    cv_file_url: '',\n\n    // ── Candidate placeholders (AI fills in WF5) ──\n    email:     '',\n    full_name: '',\n    phone:     ''\n  },\n  binary: {\n    cv_file: item.binary.cv_file\n  }\n}];"
+      },
+      "id": "f10aae5a-0a20-49bf-a845-e03b57d95367",
+      "name": "Code - Parse Webhook Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -624,
+        112
+      ],
+      "notes": "Parses the nested body.data JSON string. Extracts project, file_info, metadata, evaluation_criteria. Builds storage key path."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Set CV URL after successful upload ──────────────────────────────\n\n// Previous parsed data (from webhook / earlier node)\nconst parsed = $('Code - Parse Webhook Body').first().json;\nconst binary = $('Code - Parse Webhook Body').first().binary;\n\n// Upload response (current node input)\nconst uploadRes = $input.first().json;\n\n// Encode key for safe URL\nconst encodedKey = encodeURI(uploadRes.Key);\n\n// Construct public URL\nconst cvFileUrl = `https://dwkhucgwbbmgyxacfgir.supabase.co/storage/v1/object/public/${encodedKey}`;\n\nreturn [{\n  json: {\n    // ✅ Keep all previous data\n    ...parsed,\n\n    // ✅ Keep upload response\n    upload_id: uploadRes.Id,\n    storage_key: uploadRes.Key,\n\n    // ✅ Add computed fields\n    cv_file_url: cvFileUrl,\n    upload_success: true,\n\n    // ✅ Optional useful metadata\n    file_name: uploadRes.Key.split('/').pop(),\n    file_path: uploadRes.Key,\n    uploaded_at: new Date().toISOString()\n  },\n\n  binary: {\n    // ✅ Keep binary if needed downstream\n    cv_file: binary?.cv_file\n  }\n}];"
+      },
+      "id": "4d682362-f374-4cea-a2d9-5d083b505e32",
+      "name": "Code - Set CV File URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        0
+      ],
+      "notes": "Builds the public CV URL and merges all parsed data back together."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Handle Upload Error ─────────────────────────────────────────────\nconst errorData = $input.first().json;\nconst parsed    = $('Code - Parse Webhook Body').first().json;\n\nconsole.error('[Manual CV Intake] Upload failed:', JSON.stringify(errorData));\n\nreturn [{\n  json: {\n    workflow_name:  'Workflow — Manual CV Intake',\n    error_message:  errorData.message || 'CV upload to Supabase Storage failed',\n    error_data:     JSON.stringify({\n      job_post_id:  parsed.job_post_id,\n      filename:     parsed.original_filename,\n      storage_key:  parsed.storage_key,\n      timestamp:    new Date().toISOString()\n    })\n  }\n}];"
+      },
+      "id": "501c1e19-01d8-40ee-990a-43659c1e7813",
+      "name": "Code - Handle Upload Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        640
+      ],
+      "notes": "Captures upload failure and formats for error_logs table."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'CV file upload failed. Please try again.', message: 'Failed to process CV data' }) }}",
+        "options": {
+          "responseCode": 500,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fd8a4b66-5aa0-48c6-b23d-3a16849a3f16",
+      "name": "Respond - Upload Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Prepare WF5 payload ─────────────────────────────────────────────\nconst dbRow  = $input.first().json;\nconst cvData = $('Code - Set CV File URL').first().json;\nconst binary = $('Code - Set CV File URL').first().binary;\n\nreturn [{\n  json: {\n    // ── Standard WF5 trigger fields ──\n    email:           cvData.email          || '',\n    full_name:       cvData.full_name      || '',\n    phone:           cvData.phone          || '',\n    source_platform: cvData.source_platform,\n    cv_file_url:     cvData.cv_file_url,\n    storage_key:     cvData.storage_key,\n    applied_at:      cvData.uploaded_at,\n\n    // ── Job requirements passed directly → WF5 skips Supabase lookup ──\n    hiring_project_id:         cvData.hiring_project_id,\n    job_description:           cvData.job_description,\n    job_status:                cvData.job_status,\n    job_title:                 cvData.job_title,\n    department:                cvData.department || 'N/A', \n    required_skills:           cvData.required_skills,\n    required_experience_years: cvData.required_experience_years,\n    required_education:        cvData.required_education,\n    skip_job_fetch:            true,\n    location:                  cvData.location,\n\n    // ── Tracking ──\n    cv_evaluation_id:  dbRow.id             || null,\n    criteria_set_id:   cvData.criteria_set_id,\n    criteria_items:    cvData.criteria_items,\n    original_filename: cvData.original_filename\n  },\n  binary: {\n    cv_file: binary?.cv_file\n  }\n}];"
+      },
+      "id": "bc654d81-51fb-408a-b8cf-ae371edfc168",
+      "name": "Code - Prepare WF5 Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "notes": "Builds the exact input WF5 expects. skip_job_fetch=true tells WF5 to use passed required_skills directly."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "dbj1ozG4QxX73mA9YfWpA",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/dbj1ozG4QxX73mA9YfWpA",
+          "cachedResultName": "New Workflow 5 — AI CV Screening & Scoring(New)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "7a5c774f-98c0-4b73-8ed2-7e7c4a49106e",
+      "name": "Execute - Call Workflow 5",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        336,
+        960
+      ],
+      "notes": "Calls WF5 and WAITS for completion. Returns full screening result before webhook responds."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Build final success response ────────────────────────────────────\nconst wf5Result = $input.first().json;\n\n// FIX: Make sure these names match your actual nodes EXACTLY!\nconst cvData = $('Code - Set CV File URL').first().json;\n\n// Use a try/catch or simple check to prevent the \"Node doesn't exist\" error\nlet dbId = null;\ntry {\n  // Replace the name below with your ACTUAL Supabase node name\n  dbId = $('Supabase - Insert CV Evaluation').first().json.id;\n} catch (e) {\n  console.log(\"Could not find Supabase node, skipping ID mapping\");\n}\n\nreturn [{\n  json: {\n    success: true,\n    message: 'CV received and screening completed successfully',\n    data: {\n      candidate_id:      wf5Result.candidate_id  || null,\n      cv_evaluation_id:  wf5Result.cv_evaluation_id,\n      job_post_id:       cvData.job_post_id,\n      job_title:         cvData.job_title,\n      original_filename: cvData.original_filename,\n      cv_file_url:       cvData.cv_file_url,\n      total_score:       wf5Result.total_score   || null,\n      status:            wf5Result.status        || 'received',\n      shortlisted:       wf5Result.shortlisted   || false,\n      processing_status: 'completed',\n      timestamp:         new Date().toISOString()\n    }\n  }\n}];\n"
+      },
+      "id": "17b80a57-f72b-4e3d-9b9c-c3defee2cda3",
+      "name": "Code - Build Success Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5840,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "5b16e373-e591-4943-86ce-0a4a40e0fb86",
+      "name": "Respond - Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        6080,
+        -32
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "45fbe59b-7d50-4920-8b59-87b62edbb38f",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1840,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const error = $input.first().json;\nconsole.error('[Manual CV Intake] Fatal error:', error.message);\n\nreturn [{\n  json: {\n    success: false,\n    error:   error.message || 'Unknown error occurred',\n    message: 'Failed to process CV data'\n  }\n}];"
+      },
+      "id": "6a96c1d1-0bb7-46f0-af3d-ae25a37eb5be",
+      "name": "Code - Build Error Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1600,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 500,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "bec5212b-2b0b-426e-a303-e8801c4dc2a2",
+      "name": "Respond - Fatal Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -1360,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://dwkhucgwbbmgyxacfgir.supabase.co/storage/v1/object/cv-files/website/{{ $now.format('yyyy') }}/{{ $now.format('MM') }}/{{ $json.email.replace('@','_at_') }}_{{ $now.toMillis() }}{{ $json.mime_type === 'application/pdf' ? '.pdf' : '.docx' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR3a2h1Y2d3YmJtZ3l4YWNmZ2lyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Njc0MjAwOSwiZXhwIjoyMDkyMzE4MDA5fQ.UtK8qPLUdOCq59EwWMeXRYn32eNi31Vk7CxaujFjT30"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR3a2h1Y2d3YmJtZ3l4YWNmZ2lyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Njc0MjAwOSwiZXhwIjoyMDkyMzE4MDA5fQ.UtK8qPLUdOCq59EwWMeXRYn32eNi31Vk7CxaujFjT30"
+            },
+            {
+              "name": "Content-Type",
+              "value": "={{ $json.mime_type }}"
+            },
+            {
+              "name": "x-upsert",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "cv_file",
+        "options": {
+          "response": {
+            "response": {}
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "57daa95a-8461-4c1f-bbcf-ac4beb5fef8d",
+      "name": "HTTP - Upload CV to Supabase Storage1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -384,
+        112
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "Uploads CV binary to Supabase Storage under cv-files/manual/. Same API key as WF1."
+    },
+    {
+      "parameters": {
+        "tableId": "error_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "workflow_name",
+              "fieldValue": "={{ $json.workflow_name }}"
+            },
+            {
+              "fieldId": "error_message",
+              "fieldValue": "={{ $json.error_message }}"
+            },
+            {
+              "fieldId": "error_data",
+              "fieldValue": "={{ $json.error_data }}"
+            }
+          ]
+        }
+      },
+      "id": "a37aea8d-646a-406f-8259-c9311940daf8",
+      "name": "Supabase - Log Upload Error1",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        640
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-req-skills",
+              "name": "required_skills",
+              "value": "=[\"General Proficiency\", \"Microsoft Office\"]",
+              "type": "string"
+            },
+            {
+              "id": "field-req-exp",
+              "name": "required_experience_years",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "id": "field-req-edu",
+              "name": "required_education",
+              "value": "Any Degree",
+              "type": "string"
+            },
+            {
+              "id": "field-project-id",
+              "name": "hiring_project_id",
+              "value": "GENERAL_APP",
+              "type": "string"
+            },
+            {
+              "id": "field-project-title",
+              "name": "job_title",
+              "value": "General Application",
+              "type": "string"
+            },
+            {
+              "id": "866829c2-a59e-4056-8b29-56ffda9a9a56",
+              "name": "hiring_project_id",
+              "value": "={{ $json.hiring_project_id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "3cef361a-cd03-48c0-9fb5-a974a7787105",
+      "name": "Set - Default Job Requirements",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        912,
+        96
+      ],
+      "notes": "Fallback: When no job_post_id is provided, use these neutral defaults. Skills score defaults to 70 (neutral), experience and education get base scores."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-req-skills-m",
+              "name": "required_skills",
+              "value": "={{ $json.required_skills || '[]' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-req-exp-m",
+              "name": "required_experience_years",
+              "value": "={{ $json.required_experience_years || 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "field-req-edu-m",
+              "name": "required_education",
+              "value": "={{ $json.required_education || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-project-id-m",
+              "name": "hiring_project_id",
+              "value": "={{ $json.hiring_project_id || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-project-title-m",
+              "name": "job_title",
+              "value": "={{ $json.title || 'Unknown Position' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8f1f859e-816d-406e-b72d-5ac7945729c8",
+      "name": "Set - Map Job Requirements",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1200,
+        -96
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "af24e42b-4be3-4c25-b962-1ed01b5e345e",
+      "name": "Merge - Requirements Ready",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1312,
+        128
+      ],
+      "notes": "Merges the 'has job post' and 'default requirements' branches back together."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Prepare CV Binary for AI Processing ─────────────────────────────\n// N8n stores binary data as base64 internally.\n// We extract the base64 string and metadata to send to OpenAI GPT-4o.\n//\n// GPT-4o can read PDFs via the vision/image_url endpoint when\n// sent as data:application/pdf;base64,<data>\n//\n// For DOCX files, we send as-is and let GPT-4o handle it.\n\nconst item = $input.first();\nconst triggerData = $('Trigger - AI Screening Entry').first().json;\nconst binaryData = item.binary?.cv_file || $('Trigger - AI Screening Entry').first().binary?.cv_file;\n\nif (!binaryData) {\n  return [{\n    json: {\n      ...triggerData,\n      ...item.json,\n      parse_error: true,\n      error_message: 'No CV binary data found. Cannot proceed with AI parsing.'\n    }\n  }];\n}\n\nconst base64CV = binaryData.data;\nconst mimeType = binaryData.mimeType || 'application/pdf';\nconst fileName = binaryData.fileName || 'cv.pdf';\n\n// Truncate base64 if extremely large (>10MB) to avoid API limits\nconst maxBase64Length = 10 * 1024 * 1024 * 1.37; // ~10MB in base64\nconst truncated = base64CV.length > maxBase64Length;\nconst safeBase64 = truncated ? base64CV.substring(0, maxBase64Length) : base64CV;\n\nreturn [{\n  json: {\n    ...triggerData,\n    ...item.json,\n    base64_cv: safeBase64,\n    cv_mime_type: mimeType,\n    cv_file_name: fileName,\n    is_pdf: mimeType === 'application/pdf',\n    is_docx: mimeType.includes('wordprocessingml'),\n    is_text: mimeType === 'text/plain',\n    cv_truncated: truncated,\n    parse_error: false\n  },\n  binary: {\n    cv_file: binaryData\n  }\n}];"
+      },
+      "id": "925e5512-310c-4fa5-af3a-5996a068f7a7",
+      "name": "Code - Prepare CV for AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "condition-is-dup",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1a357e8f-f063-4c43-bb7b-0a1b854f73d7",
+      "name": "If - Is Duplicate Application",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4448,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "candidates",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.existing_candidate_id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "id",
+              "fieldValue": "={{ $json.existing_candidate_id }}"
+            },
+            {
+              "fieldId": "full_name",
+              "fieldValue": "={{ $json.matched_name || $('Code - Parse AI CV Response1').item.json.full_name }}"
+            },
+            {
+              "fieldId": "phone",
+              "fieldValue": "={{ $json.phone }}"
+            },
+            {
+              "fieldId": "fingerprint",
+              "fieldValue": "={{ $json.fingerprint }}"
+            },
+            {
+              "fieldId": "location",
+              "fieldValue": "={{ $json.parsed_location }}"
+            },
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $json.matched_email }}"
+            }
+          ]
+        }
+      },
+      "id": "540c83b1-9212-40e2-9786-15ce849d7f1b",
+      "name": "Supabase - Update Existing Candidate",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4688,
+        -160
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-cand-id-dup",
+              "name": "candidate_id",
+              "value": "={{ $json.id || $('Call \\'Workflow 6 — Duplicate Detection\\'').item.json.existing_candidate_id}}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "1ffeedb7-2712-457f-8ca4-179b7bf4ae46",
+      "name": "Set - Use Existing Candidate ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4928,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "candidates",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "full_name",
+              "fieldValue": "={{ $json.full_name }}"
+            },
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_email }}"
+            },
+            {
+              "fieldId": "phone",
+              "fieldValue": "={{ $json.phone || $('Code - Score Candidate1').item.json.phone || \"\" }}"
+            },
+            {
+              "fieldId": "linkedin_url",
+              "fieldValue": "={{ $json.linkedin_url }}"
+            },
+            {
+              "fieldId": "location",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_location }}"
+            },
+            {
+              "fieldId": "fingerprint",
+              "fieldValue": "={{ $json.fingerprint }}"
+            }
+          ]
+        }
+      },
+      "id": "59260ecb-6e88-481a-a3b0-ee12eef6b204",
+      "name": "Supabase - Insert New Candidate",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4688,
+        80
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-cand-id-new",
+              "name": "candidate_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "90f5ac7b-86a1-477a-97fb-a617ab3081f9",
+      "name": "Set - Use New Candidate ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4928,
+        80
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "78d36801-aa5e-42bb-8655-9b735ff4ea41",
+      "name": "Merge - Candidate ID Ready",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        5168,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "cv_evaluations",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "candidate_id",
+              "fieldValue": "={{ $json.candidate_id }}"
+            },
+            {
+              "fieldId": "parsed_name",
+              "fieldValue": "={{ $json.full_name }}"
+            },
+            {
+              "fieldId": "parsed_email",
+              "fieldValue": "={{ $json.email }}"
+            },
+            {
+              "fieldId": "parsed_phone",
+              "fieldValue": "={{ $json.phone }}"
+            },
+            {
+              "fieldId": "cv_file_url",
+              "fieldValue": "={{ $('Trigger - Duplicate Check Entry').first().json.cv_file_url }}"
+            },
+            {
+              "fieldId": "source_platform",
+              "fieldValue": "={{ $('Code - Parse Webhook Body').first().json.source_platform }}"
+            },
+            {
+              "fieldId": "parsed_location",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first\n().json.parsed_location }}"
+            },
+            {
+              "fieldId": "parsed_skills",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_skills }}"
+            },
+            {
+              "fieldId": "parsed_experience_years",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_experience_years }}"
+            },
+            {
+              "fieldId": "parsed_education",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first\n().json.parsed_education }}"
+            },
+            {
+              "fieldId": "parsed_companies",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_companies }}"
+            },
+            {
+              "fieldId": "parsed_projects",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_projects }}"
+            },
+            {
+              "fieldId": "parsed_summary",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.parsed_summary }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.status }}"
+            },
+            {
+              "fieldId": "skills_match_score",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.skills_match_score }}"
+            },
+            {
+              "fieldId": "experience_score",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.education_score }}"
+            },
+            {
+              "fieldId": "education_score",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.education_score }}"
+            },
+            {
+              "fieldId": "additional_score",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.additional_score }}"
+            },
+            {
+              "fieldId": "shortlisted",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.shortlisted }}"
+            },
+            {
+              "fieldId": "shortlist_reason",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.shortlist_reason }}"
+            },
+            {
+              "fieldId": "reject_reason",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.reject_reason }}"
+            },
+            {
+              "fieldId": "total_score",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.total_score }}"
+            },
+            {
+              "fieldId": "hiring_project_id",
+              "fieldValue": "={{ $('Code - Parse AI CV Response1').first().json.hiring_project_id }}"
+            }
+          ]
+        }
+      },
+      "id": "8d6fe147-85a5-49d5-8618-0ba19459289d",
+      "name": "Supabase - Insert CV Evaluation",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        5360,
+        -32
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      },
+      "notes": "Inserts the complete CV evaluation record with all parsed fields, scores, and status into the cv_evaluations table."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Final Output Summary ─────────────────────────────────────────────\nconst item = $input.first().json;\n\nconsole.log(`[AI Screening] Completed: ${item.parsed_name || item.full_name} | Score: ${item.total_score}% | Status: ${item.status} | Source: ${item.source_platform}`);\n\nreturn [{\n  json: {\n    screening_complete: true,\n    cv_evaluation_id:item.id,\n    candidate_id: item.candidate_id,\n    candidate_name: item.parsed_name || item.full_name,\n    candidate_email: item.parsed_email || item.email,\n    total_score: item.total_score,\n    status: item.status,\n    shortlisted: item.shortlisted,\n    source_platform: item.source_platform,\n    job_title: item.job_title,\n    skills_matched: item.scoring_details?.matched_skills || [],\n    skills_missing: item.scoring_details?.unmatched_skills || [],\n    screened_at: item.screened_at\n  }\n}];"
+      },
+      "id": "e6158ec8-df8f-4192-8c24-03130b0f6d8e",
+      "name": "Code - Screening Complete Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5616,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "error_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "workflow_name",
+              "fieldValue": "Workflow 5 — AI CV Screening and Scoring"
+            },
+            {
+              "fieldId": "error_message",
+              "fieldValue": "={{ $json.error_message }}"
+            },
+            {
+              "fieldId": "error_data",
+              "fieldValue": "={{ JSON.stringify({ email: $json.candidate_email, timestamp: $now.toISO() }) }}"
+            }
+          ]
+        }
+      },
+      "id": "25ba3e87-91ae-47b0-adf3-a2d6044f7b75",
+      "name": "Supabase - Log CV Error",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2112,
+        128
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      },
+      "notes": "Logs cases where CV binary data is missing or corrupted. This can happen if the intake workflow failed to pass the binary correctly."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5d445693-f955-4c78-9962-cf6c77137e82",
+              "leftValue": "={{ $json.job_post_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        640,
+        -16
+      ],
+      "id": "211ee5b2-4452-4f92-8875-2d719b27ab4b",
+      "name": "If - Has Job Post ID"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9a93bea2-f2c0-4382-b95b-f840d102fec0",
+              "leftValue": "={{ $json.cv_file_url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1856,
+        -16
+      ],
+      "id": "191f9ecc-8d7f-4611-9984-f387bb392a5d",
+      "name": "If - CV Data Ready1"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "cv_file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1984,
+        -272
+      ],
+      "id": "6f65d556-845c-483b-bb53-fbe0f76cc608",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────────────────────\n// Parse AI CV Response — Production Grade FINAL\n// FIXED:\n//   ✅ AI scoring is source of truth\n//   ✅ Incomplete AI responses NEVER fallback to shortlist\n//   ✅ safeInt preserves null properly\n//   ✅ shortlisted ALWAYS derived from status\n//   ✅ fallback scoring only used when scoring block absent\n//   ✅ total_score safely defaults to 0\n//   ✅ education relevance support\n//   ✅ score audit transparency\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst response    = $input.first().json || {};\nconst triggerData = $('Trigger - AI Screening Entry').first().json;\nconst reqData     = $('Code - Prepare CV for AI').first().json;\n\n// ═════════════════════════════════════════════════════════════════════════════\n// HELPERS\n// ═════════════════════════════════════════════════════════════════════════════\n\nfunction normalize(str) {\n  return String(str || '').toLowerCase().trim();\n}\n\nfunction safeArray(val) {\n  if (Array.isArray(val)) return val;\n\n  if (!val) return [];\n\n  try {\n    const parsed = JSON.parse(val);\n    return Array.isArray(parsed) ? parsed : [];\n  } catch {\n    return [];\n  }\n}\n\nfunction parseSkills(raw) {\n  if (!raw) return [];\n\n  if (Array.isArray(raw)) {\n    return raw.map(normalize);\n  }\n\n  const str = String(raw).trim();\n\n  if (str.startsWith('{') && str.endsWith('}')) {\n    return str\n      .slice(1, -1)\n      .split(',')\n      .map(normalize);\n  }\n\n  try {\n    const parsed = JSON.parse(str);\n    return Array.isArray(parsed)\n      ? parsed.map(normalize)\n      : [];\n  } catch {\n    return [];\n  }\n}\n\n// ✅ FIXED — preserves null values\nfunction safeInt(val, fallback = null) {\n  if (val === null || val === undefined || val === '') {\n    return fallback;\n  }\n\n  const n = parseInt(val, 10);\n\n  if (isNaN(n)) return fallback;\n\n  return Math.min(100, Math.max(0, n));\n}\n\nfunction safeFloat(val, fallback = 0) {\n  if (val === null || val === undefined || val === '') {\n    return fallback;\n  }\n\n  const n = parseFloat(val);\n\n  return isNaN(n) ? fallback : n;\n}\n\n// ═════════════════════════════════════════════════════════════════════════════\n// API ERROR CHECK\n// ═════════════════════════════════════════════════════════════════════════════\n\nif (response.error) {\n  return [{\n    json: {\n      ...triggerData,\n      ...reqData,\n      parse_error: true,\n      error_message:\n        `AI API error: ${\n          response.error.message || JSON.stringify(response.error)\n        }`\n    }\n  }];\n}\n\n// ═════════════════════════════════════════════════════════════════════════════\n// EXTRACT RAW TEXT\n// ═════════════════════════════════════════════════════════════════════════════\n\nlet rawText = '';\n\nif (response.output) {\n  rawText = response.output;\n\n} else if (response.content?.parts?.[0]?.text) {\n  rawText = response.content.parts[0].text;\n\n} else if (response.candidates?.[0]?.content?.parts?.[0]?.text) {\n  rawText = response.candidates[0].content.parts[0].text;\n\n} else if (response.choices?.[0]?.message?.content) {\n  rawText = response.choices[0].message.content;\n\n} else if (response.text) {\n  rawText = response.text;\n\n} else if (\n  Array.isArray($input.all()) &&\n  $input.all()[0]?.json?.output\n) {\n  rawText = $input.all()[0].json.output;\n}\n\nif (!rawText) {\n  return [{\n    json: {\n      ...triggerData,\n      ...reqData,\n      parse_error: true,\n      error_message: 'AI returned empty response.'\n    }\n  }];\n}\n\n// ═════════════════════════════════════════════════════════════════════════════\n// PARSE JSON\n// ═════════════════════════════════════════════════════════════════════════════\n\nlet parsed = {};\nlet parseError = false;\n\ntry {\n  let clean = rawText\n    .replace(/```json\\s*/gi, '')\n    .replace(/```\\s*/gi, '')\n    .trim();\n\n  const jsonStart = clean.indexOf('{');\n  const jsonEnd   = clean.lastIndexOf('}');\n\n  if (jsonStart !== -1 && jsonEnd !== -1) {\n    clean = clean.substring(jsonStart, jsonEnd + 1);\n  }\n\n  parsed = JSON.parse(clean);\n\n} catch (e) {\n  parseError = true;\n  parsed = {};\n}\n\nif (parseError || parsed.parse_error) {\n  return [{\n    json: {\n      ...triggerData,\n      ...reqData,\n      parse_error: true,\n      error_message:\n        parsed.error || 'Failed to parse AI JSON response.'\n    }\n  }];\n}\n\n// ═════════════════════════════════════════════════════════════════════════════\n// EXTRACT PARSED DATA\n// ═════════════════════════════════════════════════════════════════════════════\n\nconst parsedName     = parsed.full_name || triggerData.full_name || '';\nconst parsedEmail    = parsed.email || triggerData.email || '';\nconst parsedPhone    = parsed.phone || triggerData.phone || '';\nconst parsedLocation = parsed.location || '';\nconst parsedSummary  = parsed.summary || '';\n\nconst candidateSkills = parseSkills(parsed.skills);\n\nconst parsedEducation = safeArray(parsed.parsed_education);\nconst parsedCompanies = safeArray(parsed.parsed_companies);\nconst parsedProjects  = safeArray(parsed.parsed_projects);\nconst parsedCerts     = safeArray(parsed.parsed_certifications);\n\nconst criterionScores = safeArray(parsed.criterion_scores);\n\n// ═════════════════════════════════════════════════════════════════════════════\n// AI SCORING (PRIMARY SOURCE OF TRUTH)\n// ═════════════════════════════════════════════════════════════════════════════\n\nconst aiScoring = parsed.scoring || {};\n\nconst aiSkillsScore     = safeInt(aiScoring.skills_match_score);\nconst aiExpScore        = safeInt(aiScoring.experience_score);\nconst aiEduScore        = safeInt(aiScoring.education_score);\nconst aiAdditionalScore = safeInt(aiScoring.additional_score);\nconst aiTotalScore      = safeInt(aiScoring.total_score);\n\nconst aiStatus          = aiScoring.status || null;\nconst aiShortlisted     = aiScoring.shortlisted ?? null;\n\n// ✅ FIXED\n// Only check if scoring object exists\n// Do NOT require total_score\nconst hasAiScoring =\n  parsed.scoring &&\n  typeof parsed.scoring === 'object' &&\n  Object.keys(parsed.scoring).length > 0;\n\n// ═════════════════════════════════════════════════════════════════════════════\n// AI SCORING DETAILS\n// ═════════════════════════════════════════════════════════════════════════════\n\nconst aiDetails    = parsed.scoring_details || {};\nconst aiScoreAudit = parsed.score_audit || {};\n\nconst candExp = safeFloat(\n  parsed.total_experience_years,\n  0\n);\n\nconst reqExp = safeFloat(\n  parsed.required_exp ??\n  aiDetails.required_exp ??\n  reqData.required_experience_years,\n  0\n);\n\nconst expGap = safeFloat(\n  aiDetails.exp_gap,\n  candExp - reqExp\n);\n\nconst projectCount =\n  parseInt(aiDetails.project_count, 10) ||\n  parsedProjects.length;\n\nconst certCount =\n  parseInt(aiDetails.cert_count, 10) ||\n  parsedCerts.length;\n\nconst eduLabel =\n  aiDetails.edu_label || 'Not detected';\n\nconst eduRelevance =\n  aiDetails.edu_field_relevance ?? null;\n\nconst eduRelevanceReason =\n  aiDetails.edu_relevance_reason || '';\n\nconst aiMatchedSkills =\n  safeArray(aiDetails.matched_skills);\n\nconst aiUnmatchedSkills =\n  safeArray(aiDetails.unmatched_skills);\n\n// ═════════════════════════════════════════════════════════════════════════════\n// FALLBACK SCORING\n// ONLY USED IF AI SCORING BLOCK IS ABSENT\n// ═════════════════════════════════════════════════════════════════════════════\n\nfunction fallbackSkillsScore(candidateSkills, reqData) {\n\n  const reqSkills = parseSkills(reqData.required_skills);\n\n  if (reqSkills.length === 0) {\n    return 50;\n  }\n\n  const matched = reqSkills.filter(rs =>\n    candidateSkills.some(cs =>\n      cs.includes(rs) || rs.includes(cs)\n    )\n  );\n\n  return Math.round(\n    Math.min(\n      (matched.length / reqSkills.length) * 100,\n      100\n    )\n  );\n}\n\nfunction fallbackExpScore(candExp, reqExp) {\n\n  if (reqExp === 0) {\n    return candExp >= 0 ? 85 : 50;\n  }\n\n  if (candExp >= reqExp) {\n    return 100;\n  }\n\n  return Math.round(\n    Math.min((candExp / reqExp) * 70, 100)\n  );\n}\n\nfunction fallbackEduScore(parsedEducation) {\n\n  const eduText =\n    JSON.stringify(parsedEducation).toLowerCase();\n\n  if (eduText.includes('phd')) {\n    return 75;\n  }\n\n  if (eduText.match(/master|mtech|m\\.sc/)) {\n    return 65;\n  }\n\n  if (eduText.match(/mba/)) {\n    return 50;\n  }\n\n  if (eduText.match(/bachelor|btech|b\\.e|bsc/)) {\n    return 55;\n  }\n\n  if (eduText.match(/diploma|12th|hsc/)) {\n    return 35;\n  }\n\n  return 40;\n}\n\nfunction fallbackAdditionalScore(projectCount, certCount) {\n\n  return Math.min(\n    50 +\n    (projectCount > 0 ? 25 : 0) +\n    (certCount > 0 ? 25 : 0),\n    100\n  );\n}\n\n// ═════════════════════════════════════════════════════════════════════════════\n// FINAL SCORE RESOLUTION\n// ═════════════════════════════════════════════════════════════════════════════\n\nlet finalSkillsScore;\nlet finalExpScore;\nlet finalEduScore;\nlet finalAdditionalScore;\nlet finalTotalScore;\n\nif (hasAiScoring) {\n\n  finalSkillsScore =\n    aiSkillsScore ??\n    fallbackSkillsScore(candidateSkills, reqData);\n\n  finalExpScore =\n    aiExpScore ??\n    fallbackExpScore(candExp, reqExp);\n\n  finalEduScore =\n    aiEduScore ??\n    fallbackEduScore(parsedEducation);\n\n  finalAdditionalScore =\n    aiAdditionalScore ??\n    fallbackAdditionalScore(projectCount, certCount);\n\n  // ✅ FIXED\n  finalTotalScore =\n    aiTotalScore !== null\n      ? aiTotalScore\n      : 0;\n\n} else {\n\n  finalSkillsScore =\n    fallbackSkillsScore(candidateSkills, reqData);\n\n  finalExpScore =\n    fallbackExpScore(candExp, reqExp);\n\n  finalEduScore =\n    fallbackEduScore(parsedEducation);\n\n  finalAdditionalScore =\n    fallbackAdditionalScore(projectCount, certCount);\n\n  finalTotalScore = Math.round(\n    (finalSkillsScore     * 0.40) +\n    (finalExpScore        * 0.30) +\n    (finalEduScore        * 0.20) +\n    (finalAdditionalScore * 0.10)\n  );\n}\n\n// ═════════════════════════════════════════════════════════════════════════════\n// STATUS + SHORTLISTED\n// ═════════════════════════════════════════════════════════════════════════════\n\nconst SHORTLIST_THRESHOLD =\n  reqData.shortlist_threshold ?? 65;\n\nconst SCREEN_THRESHOLD =\n  reqData.screen_threshold ?? 45;\n\nlet finalStatus;\n\n// ✅ FIXED\nif (hasAiScoring) {\n\n  finalStatus =\n    aiStatus || 'Incomplete';\n\n} else {\n\n  if (finalTotalScore >= SHORTLIST_THRESHOLD) {\n    finalStatus = 'Shortlisted';\n\n  } else if (finalTotalScore >= SCREEN_THRESHOLD) {\n    finalStatus = 'Screened';\n\n  } else {\n    finalStatus = 'Rejected';\n  }\n}\n\n// ✅ ALWAYS DERIVED FROM STATUS\nconst finalShortlisted =\n  finalStatus === 'Shortlisted';\n\n// ═════════════════════════════════════════════════════════════════════════════\n// SKILL MATCHING DETAILS\n// ═════════════════════════════════════════════════════════════════════════════\n\nconst reqSkillsFallback =\n  parseSkills(reqData.required_skills);\n\nconst noRequirements =\n  reqSkillsFallback.length === 0;\n\nconst matchedSkills =\n  aiMatchedSkills.length > 0\n    ? aiMatchedSkills\n    : noRequirements\n      ? candidateSkills\n      : reqSkillsFallback.filter(rs =>\n          candidateSkills.some(cs =>\n            cs.includes(rs) || rs.includes(cs)\n          )\n        );\n\nconst unmatchedSkills =\n  aiUnmatchedSkills.length > 0\n    ? aiUnmatchedSkills\n    : noRequirements\n      ? []\n      : reqSkillsFallback.filter(\n          rs => !matchedSkills.includes(rs)\n        );\n\n// ═════════════════════════════════════════════════════════════════════════════\n// AI METADATA\n// ═════════════════════════════════════════════════════════════════════════════\n\nconst tokensTotal =\n  response.usageMetadata?.totalTokenCount ||\n  response.usage?.total_tokens ||\n  0;\n\nconst modelUsed =\n  response.modelVersion ||\n  response.model ||\n  'unknown';\n\n// ═════════════════════════════════════════════════════════════════════════════\n// FINAL OUTPUT\n// ═════════════════════════════════════════════════════════════════════════════\n\nreturn [{\n  json: {\n\n    ...triggerData,\n    ...reqData,\n\n    // ── Parsed candidate data ─────────────────\n    parsed_name:     parsedName,\n    parsed_email:    parsedEmail,\n    parsed_phone:    parsedPhone,\n    parsed_location: parsedLocation,\n    parsed_summary:  parsedSummary,\n\n    parsed_skills:           candidateSkills,\n    parsed_experience_years: candExp,\n\n    parsed_education:\n      JSON.stringify(parsedEducation),\n\n    parsed_companies:      parsedCompanies,\n    parsed_projects:       parsedProjects,\n    parsed_certifications: parsedCerts,\n\n    // ── Final scoring ─────────────────────────\n    total_score: finalTotalScore,\n    status:      finalStatus,\n    shortlisted: finalShortlisted,\n\n    skills_match_score:\n      Math.round(finalSkillsScore || 0),\n\n    experience_score:\n      Math.round(finalExpScore || 0),\n\n    education_score:\n      Math.round(finalEduScore || 0),\n\n    additional_score:\n      Math.round(finalAdditionalScore || 0),\n\n    // ── Scoring details ───────────────────────\n    scoring_details: {\n\n      matched_skills:   matchedSkills,\n      unmatched_skills: unmatchedSkills,\n\n      no_requirements: noRequirements,\n\n      candidate_exp: candExp,\n      required_exp:  reqExp,\n\n      exp_gap:\n        parseFloat((candExp - reqExp).toFixed(1)),\n\n      project_count: projectCount,\n      cert_count:    certCount,\n\n      edu_label: eduLabel,\n\n      edu_field_relevance:\n        eduRelevance,\n\n      edu_relevance_reason:\n        eduRelevanceReason,\n\n      job_level:\n        parsed.job_level || 'unknown'\n    },\n\n    // ── Transparency ──────────────────────────\n    score_audit: aiScoreAudit,\n\n    override_reason:\n      parsed.override_reason || null,\n\n    shortlist_reason:\n      parsed.shortlist_reason || null,\n\n    reject_reason:\n      parsed.reject_reason || null,\n\n    criterion_scores:\n      criterionScores,\n\n    scoring_source:\n      hasAiScoring ? 'ai' : 'fallback',\n\n    // ── AI metadata ───────────────────────────\n    ai_model: modelUsed,\n\n    ai_tokens_used:\n      tokensTotal\n  }\n}];"
+      },
+      "id": "ee53a88d-48bc-4da4-8ecd-5080594bbde6",
+      "name": "Code - Parse AI CV Response1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2528,
+        -272
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "hiring_projects",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "keyValue": "={{ $json.hiring_project_id }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        896,
+        -112
+      ],
+      "id": "e43df916-bb35-422f-a6b3-9faed020e432",
+      "name": "Supabase - Get Job Post",
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=RESUME_TEXT — {{ $json.text }}\nJOB_DESCRIPTION — {{ $('Code - Prepare CV for AI').first().json.job_description }}\nEVALUATION_CRITERIA — {{ $('Code - Prepare CV for AI').first().json.criteria_items  || \"NO EValuation Critreria\"}}",
+        "options": {
+          "systemMessage": "=You are a senior AI-powered Talent Intelligence Agent. Your job is to evaluate a candidate's resume against a Job Description (JD) and a structured Evaluation Criteria list, and return a single valid JSON object.\n\nYou are NOT a keyword-matching engine. You are an intelligent evaluator that reasons about relevance, transferability, and potential — just as a seasoned technical recruiter would.\n\n---\n\n## INPUTS\n\nYou will always receive exactly three inputs:\n\n  RESUME_TEXT        — Raw text extracted from the candidate's resume.\n  JOB_DESCRIPTION    — Full text of the job posting.\n  EVALUATION_CRITERIA — A JSON array of criterion objects, each with:\n    {\n      \"criterion_name\": string,\n      \"criterion_description\": string,\n      \"weight\": number (0.0–1.0),\n      \"criterion_type\": \"skill\" | \"education\" | \"experience\",\n      \"expected_value\": string\n    }\n\n---\n\n## STEP 1 — EXTRACT (parse the resume faithfully)\n\n### Personal Info\nExtract full_name, email, phone, location. Set null if absent.\n\n### Skills\nExtract ALL skills mentioned anywhere — technical tools, methodologies, soft skills, domain knowledge.\nNormalize: \"JS\" → \"JavaScript\", \"ML\" → \"Machine Learning\", \"Gen AI\" → \"Generative AI\".\nDo NOT limit to a predefined list. Capture what is actually on the resume.\n\n### Experience\n- Sum all non-overlapping work durations → total_experience_years (1 decimal).\n- For roles with \"Present\", compute duration using today as the end date.\n- List each role in parsed_companies: { role, company, duration, start_date, end_date }\n\n### Education\n- Extract each degree: { degree, institution, field, year }\n- Identify the highest_degree (PhD > Masters > Bachelors > Diploma > High School > None).\n- Assess edu_relevance: is the field of study related to the JD's domain? (true/false + brief reason)\n\n### Projects\n{ name, description, technologies[] }\n\n### Certifications\n{ name, issuer, year }\n\n---\n\n## STEP 2 — EVALUATE EACH CRITERION (this is the core intelligence step)\n\nFor EACH criterion in EVALUATION_CRITERIA, you must:\n\n1. Read the criterion_name, criterion_description, and expected_value carefully.\n2. Search the resume holistically — title, summary, skills, experience bullets, projects, certifications.\n3. Score that criterion from 0–100 using these tiers:\n\n   SKILL criteria:\n   100 — Direct match: the exact skill or a direct synonym is explicitly present and demonstrated.\n    75 — Strong adjacent: a closely related skill is present that transfers directly (e.g., \"Tableau\" when \"Power BI\" is expected; \"pandas/numpy\" when \"data analysis\" is expected; \"supervised learning project\" when \"ML knowledge\" is expected).\n    50 — Partial/indirect: the candidate has worked in a context where the skill is commonly used, or has a foundational version of it.\n    25 — Weak signal: a tangential mention or a beginner-level exposure with no demonstrated application.\n     0 — No evidence at all in the resume.\n\n   EDUCATION criteria:\n   100 — Degree field directly matches JD domain AND meets or exceeds required level.\n    75 — Degree level matches but field is adjacent (e.g., MBA with data specialization for an analytics role).\n    50 — Degree field is partially relevant or level is one step below required.\n    25 — Degree exists but field is unrelated to JD domain.\n     0 — No relevant degree or qualification found.\n\n   EXPERIENCE criteria:\n   100 — Direct domain experience present and meets or exceeds expected value.\n    75 — Adjacent domain experience that demonstrates transferable skills.\n    50 — Some relevant exposure but not in primary role.\n    25 — Minimal or indirect exposure only.\n     0 — No relevant experience found.\n\n4. Record for each criterion:\n   {\n     \"criterion_name\": string,\n     \"raw_score\": number (0–100),\n     \"weight\": number,\n     \"weighted_contribution\": number (raw_score * weight, rounded to 2 decimals),\n     \"match_type\": \"direct\" | \"adjacent\" | \"partial\" | \"weak\" | \"none\",\n     \"evidence\": string (1 sentence citing where in the resume this score comes from, or \"No evidence found.\")\n   }\n\n---\n\n## STEP 3 — COMPUTE AGGREGATE SCORES\n\nAfter scoring all criteria individually, group them by criterion_type:\n\n  skill_criteria        = all criteria where criterion_type == \"skill\"\n  education_criteria    = all criteria where criterion_type == \"education\"\n  experience_criteria   = all criteria where criterion_type == \"experience\"\n\nFor each group:\n  group_score = round(\n    sum(raw_score * weight for each criterion in group) /\n    sum(weight for each criterion in group)\n  )\n\n  skills_match_score      = group_score for skill_criteria\n  education_score         = group_score for education_criteria\n  experience_score        = group_score for experience_criteria\n\nAdditional score (bonus signals):\n  project_count  = len(parsed_projects)\n  cert_count     = len(parsed_certifications)\n  additional_score = min(100, (project_count * 10) + (cert_count * 15))\n\nTotal weighted score:\n  Compute total_score as the weighted average across ALL criteria (not just groups):\n  total_score = round(\n    sum(criterion.raw_score * criterion.weight for ALL criteria) /\n    sum(criterion.weight for ALL criteria)\n  )\n\n  Apply additional bonus: total_score = min(100, total_score + round(additional_score * 0.05))\n\n---\n\n## STEP 4 — STATUS DECISION (reason holistically, then decide)\n\nBefore assigning status, reason through the following questions internally:\n  - Does the candidate demonstrate any transferable or adjacent skills that compensate for missing direct matches?\n  - Is the candidate's trajectory (career direction, recent roles, certifications) moving toward the JD's domain?\n  - Are the missing skills learnable quickly vs. foundational gaps?\n  - Does the candidate meet the spirit of the role even if not every keyword?\n\nTHEN apply thresholds (these are defaults; use shortlist_threshold and screen_threshold from input if provided, else use defaults below):\n  total_score >= 65  → status = \"Shortlisted\",  shortlisted = true\n  total_score >= 45  → status = \"Screened\",      shortlisted = false\n  total_score < 45   → status = \"Rejected\",      shortlisted = false\n\nshortlist_reason (if shortlisted = true):\n  Write 2–3 sentences. Cite specific strengths from the resume that align with the JD.\n  Mention the top 2 matched criteria by name.\n\nreject_reason (if shortlisted = false):\n  Write 2–3 sentences. Be specific about what is missing.\n  Distinguish between \"hard gaps\" (foundational skills absent) and \"soft gaps\" (adjacent but not direct).\n  NEVER say \"candidate does not meet requirements\" generically — cite the actual criteria.\n\n---\n\n## STEP 5 — WRITE CANDIDATE SUMMARY\n\nWrite a 3–5 sentence professional summary of the candidate based ONLY on resume content.\nCover: total experience, domain focus, strongest demonstrated skills, career trajectory, and one notable achievement.\nDo NOT mention the JD or the evaluation. This is a neutral factual summary.\n\n---\n\n## OUTPUT FORMAT\n\nReturn ONLY a single valid JSON object. No markdown. No explanation. No text before or after.\n\n{\n  \"full_name\": \"string | null\",\n  \"email\": \"string | null\",\n  \"phone\": \"string | null\",\n  \"location\": \"string | null\",\n  \"skills\": [\"string\"],\n  \"total_experience_years\": number,\n  \"summary\": \"string\",\n  \"parsed_education\": [\n    { \"degree\": \"string\", \"institution\": \"string\", \"field\": \"string\", \"year\": \"string | null\" }\n  ],\n  \"parsed_companies\": [\n    { \"role\": \"string\", \"company\": \"string\", \"duration\": \"string\", \"start_date\": \"string\", \"end_date\": \"string | null\" }\n  ],\n  \"parsed_projects\": [\n    { \"name\": \"string\", \"description\": \"string\", \"technologies\": [\"string\"] }\n  ],\n  \"parsed_certifications\": [\n    { \"name\": \"string\", \"issuer\": \"string | null\", \"year\": \"string | null\" }\n  ],\n  \"criterion_scores\": [\n    {\n      \"criterion_name\": \"string\",\n      \"raw_score\": number,\n      \"weight\": number,\n      \"weighted_contribution\": number,\n      \"match_type\": \"direct | adjacent | partial | weak | none\",\n      \"evidence\": \"string\"\n    }\n  ],\n  \"scoring\": {\n    \"skills_match_score\": number,\n    \"experience_score\": number,\n    \"education_score\": number,\n    \"additional_score\": number,\n    \"total_score\": number,\n    \"status\": \"New | Screened | Shortlisted | Under Review | Rejected\",\n    \"shortlisted\": boolean\n  },\n  \"scoring_details\": {\n    \"matched_skills\": [\"string\"],\n    \"unmatched_skills\": [\"string\"],\n    \"candidate_exp\": number,\n    \"required_exp\": number,\n    \"exp_gap\": number,\n    \"project_count\": number,\n    \"cert_count\": number,\n    \"edu_label\": \"string\",\n    \"edu_relevance\": \"string\"\n  },\n  \"shortlist_reason\": \"string | null\",\n  \"reject_reason\": \"string | null\"\n}\n\n---\n\n## ABSOLUTE RULES\n\n1. NEVER return skills_match_score = 0 unless zero criteria of type \"skill\" have ANY evidence in the resume. Adjacent and partial matches MUST contribute partial scores per the tiers above.\n2. NEVER hallucinate skills, companies, degrees, or dates not present in RESUME_TEXT.\n3. ALWAYS populate criterion_scores for every criterion in EVALUATION_CRITERIA — no skipping.\n4. matched_skills = skills from the resume that map to any criterion (direct OR adjacent). unmatched_skills = criterion expected_values with NO evidence at all.\n5. required_exp: infer from JD text (e.g. \"0-1 years\" for intern roles → 0). If JD implies no experience required, set required_exp = 0.\n6. All score values must be integers 0–100. weighted_contribution is the only float field.\n7. edu_label must be the highest degree found: \"PhD\" | \"Masters\" | \"Bachelors\" | \"Diploma\" | \"High School\" | \"None\".\n8. If total_score cannot be computed (missing criteria), set total_score = null and status = \"Incomplete\".\n9. The JSON must be parseable by JSON.parse() with no pre/post text."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2192,
+        -272
+      ],
+      "id": "1cd3b7a5-f215-49d8-bb9a-ebcea7e5c08b",
+      "name": "AI Agent",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2064,
+        -64
+      ],
+      "id": "3bc77c46-c06a-4856-be11-eb77a0354b9f",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "zP1UV2gy6FRmo52w",
+          "name": "New Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── Generate Candidate Fingerprint ──────────────────────────────────\nconst item = $input.first().json;\nconst email = (item.email || item.parsed_email || '').toLowerCase().trim();\nconst phone = (item.phone || item.parsed_phone || '').replace(/\\D/g, '');\n\nif (!email) {\n  return [{ json: { ...item, fingerprint: null, email_normalized: '', _skip_dedup: true } }];\n}\n\nconst raw = `${email}::${phone}`;\nlet hash = 0;\nfor (let i = 0; i < raw.length; i++) {\n  const char = raw.charCodeAt(i);\n  hash = ((hash << 5) - hash) + char;\n  hash = hash & hash;\n}\nconst fingerprint = `fp_${Math.abs(hash)}_${email.split('@')[0]}`;\n\nreturn [{ json: { ...item, fingerprint, email_normalized: email, _skip_dedup: false } }];"
+      },
+      "id": "02b3f000-a1c8-468c-9731-9f4c9e50d52c",
+      "name": "Code - Generate Candidate Fingerprint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3168,
+        -272
+      ],
+      "notes": "Generates deterministic fingerprint from email+phone. Sets _skip_dedup=true if no email."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "check-skip-dedup",
+              "leftValue": "={{ $json.parsed_email }}",
+              "rightValue": true,
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "6abe3024-9021-44d5-9178-76d3f790e70f",
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "cc344541-817f-4ed1-8439-e0a42da80a3e",
+      "name": "If - Has Email",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3392,
+        -272
+      ],
+      "notes": "FIX: Changed from Filter to If node so both branches are routable. True (_skip_dedup=true) → No Email Fallback. False → Supabase lookup."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-no-email-dup",
+              "name": "is_duplicate",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "field-no-email-id",
+              "name": "existing_candidate_id",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-fp",
+              "name": "fingerprint",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-note",
+              "name": "dedup_note",
+              "value": "Skipped dedup — no email provided",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-name",
+              "name": "full_name",
+              "value": "={{ $json.full_name || $json.parsed_name || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-phone",
+              "name": "phone",
+              "value": "={{ $json.phone || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-src",
+              "name": "source_platform",
+              "value": "={{ $json.source_platform || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-job",
+              "name": "job_post_id",
+              "value": "={{ $json.job_post_id || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-cv",
+              "name": "cv_file_url",
+              "value": "={{ $json.cv_file_url || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-li",
+              "name": "linkedin_url",
+              "value": "={{ $json.linkedin_url || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-no-email-at",
+              "name": "applied_at",
+              "value": "={{ $json.applied_at || $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9980f17f-7690-450e-a7ab-62e16ebe75a3",
+      "name": "Set - No Email Fallback",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4080,
+        -512
+      ],
+      "notes": "FIX: Now correctly wired from If - Has Email true branch. Returns is_duplicate=false with all available candidate fields."
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "candidates",
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "email",
+              "condition": "eq",
+              "keyValue": "={{ $json.email_normalized }}"
+            },
+            {
+              "keyName": "full_name",
+              "condition": "eq",
+              "keyValue": "={{ $json.parsed_name }}"
+            }
+          ]
+        }
+      },
+      "id": "0dde69dc-066c-41a3-a9ec-9447ae2c3c85",
+      "name": "Supabase - Check Duplicate by Email",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3616,
+        -272
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "bxl718E17e4m6QX6",
+          "name": "Fortiv HireMind"
+        }
+      },
+      "notes": "Queries candidates table for existing record with same normalized email. getAll with limit 1 never throws on empty result — returns empty array instead."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-is-dup",
+              "name": "is_duplicate",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "field-existing-id",
+              "name": "existing_candidate_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            },
+            {
+              "id": "field-fingerprint-dup",
+              "name": "fingerprint",
+              "value": "={{ $('Code - Generate Candidate Fingerprint').item.json.fingerprint }}",
+              "type": "string"
+            },
+            {
+              "id": "field-match-email",
+              "name": "matched_email",
+              "value": "={{ $json.email || $('Trigger - Duplicate Check Entry').item.json.parsed_email }}",
+              "type": "string"
+            },
+            {
+              "id": "field-match-name",
+              "name": "matched_name",
+              "value": "={{ $json.full_name || $('Trigger - Duplicate Check Entry').item.json.parsed_name }}",
+              "type": "string"
+            },
+            {
+              "id": "field-source",
+              "name": "source_platform",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.source_platform || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-job-post",
+              "name": "job_post_id",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.job_post_id || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-cv-dup",
+              "name": "cv_file_url",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.cv_file_url || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-applied-dup",
+              "name": "applied_at",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.applied_at || $now.toISO() }}",
+              "type": "string"
+            },
+            {
+              "id": "a0f9d0ec-cc99-4f05-a0e3-0cad0222d4eb",
+              "name": "phone",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.phone || $('Trigger - Duplicate Check Entry').item.json.parsed_phone || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "f149313a-d859-4d2b-9b35-c8e97935096a",
+              "name": "parsed_location",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_location || $('Trigger - Duplicate Check Entry').item.json.parsed_location || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "e271c35d-4233-4aa5-8fc3-8b103479c3fb",
+              "name": "parsed_skills",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_skills }}",
+              "type": "array"
+            },
+            {
+              "id": "fa62346f-f3b8-4a1b-b02a-5b65ea818733",
+              "name": "parsed_experience_years",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_experience_years }}",
+              "type": "number"
+            },
+            {
+              "id": "7e63e816-ab4c-47a9-b029-99be4e3a7295",
+              "name": "parsed_education",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_education }}",
+              "type": "string"
+            },
+            {
+              "id": "b8e62999-400f-47d4-a1f2-ea92d1ef7a13",
+              "name": "parsed_companies",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_companies }}",
+              "type": "array"
+            },
+            {
+              "id": "4c5cf83b-b82a-409b-a304-3e39d079af16",
+              "name": "parsed_projects",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_projects }}",
+              "type": "array"
+            },
+            {
+              "id": "550d2bf1-9115-4d49-b844-884a6a935ed3",
+              "name": "parsed_certifications",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_certifications }}",
+              "type": "array"
+            },
+            {
+              "id": "3a92e41f-8380-4956-af64-645a1d5ec8b5",
+              "name": "parsed_summary",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.parsed_summary }}",
+              "type": "string"
+            },
+            {
+              "id": "6e470e4d-6c94-471f-b779-c1fdc0facd25",
+              "name": "status",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.status }}",
+              "type": "string"
+            },
+            {
+              "id": "43211330-1ff4-40d7-84aa-7b842a35f293",
+              "name": "shortlisted",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.shortlisted }}",
+              "type": "boolean"
+            },
+            {
+              "id": "9b7e393f-568f-4504-984a-66fb7c8c6aad",
+              "name": "skills_match_score",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.skills_match_score }}",
+              "type": "number"
+            },
+            {
+              "id": "63a3d2d6-0c53-48c2-81f8-febcd37bf24b",
+              "name": "experience_score",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.experience_score }}",
+              "type": "number"
+            },
+            {
+              "id": "fd6b17e4-fb69-44c4-9012-f139016b7239",
+              "name": "additional_score",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.additional_score }}",
+              "type": "number"
+            },
+            {
+              "id": "c99d3f01-c031-4e0f-bf47-8fe43c017d6d",
+              "name": "education_score",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.education_score }}",
+              "type": "number"
+            },
+            {
+              "id": "80657a37-a49e-4c3a-ad88-7ae40c5064cb",
+              "name": "shortlist_reason",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.shortlist_reason }}",
+              "type": "string"
+            },
+            {
+              "id": "2f2b4aad-896a-4ea8-a24c-76d33ea2ee60",
+              "name": "reject_reason",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.reject_reason }}",
+              "type": "string"
+            },
+            {
+              "id": "ead9a8c4-6c1d-432b-bd24-2b0487a8ae50",
+              "name": "scoring_details.matched_skills",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.scoring_details.matched_skills }}",
+              "type": "array"
+            },
+            {
+              "id": "02ddde86-010f-4ab0-957a-7ffb32ada3f2",
+              "name": "scoring_details.unmatched_skills",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.scoring_details.unmatched_skills }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {
+          "ignoreConversionErrors": true
+        }
+      },
+      "id": "a1dd2f54-2fff-4d67-afdc-b1e5b0ffa16a",
+      "name": "Set - Duplicate Found",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4080,
+        -336
+      ],
+      "notes": "FIX: mode + includeOtherFields added. Returns is_duplicate=true, existing_candidate_id, fingerprint, matched_email, matched_name, source_platform, job_post_id, cv_file_url, applied_at."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "field-not-dup",
+              "name": "is_duplicate",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "field-no-id",
+              "name": "existing_candidate_id",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "field-fingerprint-new",
+              "name": "fingerprint",
+              "value": "={{ $('Code - Generate Candidate Fingerprint').item.json.fingerprint }}",
+              "type": "string"
+            },
+            {
+              "id": "field-email-new",
+              "name": "email",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.email }}",
+              "type": "string"
+            },
+            {
+              "id": "field-name-new",
+              "name": "full_name",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.full_name || $('Trigger - Duplicate Check Entry').item.json.parsed_name || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-phone-new",
+              "name": "phone",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.phone || $('Trigger - Duplicate Check Entry').item.json.parsed_phone || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-source-new",
+              "name": "source_platform",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.source_platform || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-job-post-new",
+              "name": "job_post_id",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.job_post_id || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-cv-url-new",
+              "name": "cv_file_url",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.cv_file_url || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-linkedin-new",
+              "name": "linkedin_url",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.linkedin_url || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "field-applied-new",
+              "name": "applied_at",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.applied_at || $now.toISO() }}",
+              "type": "string"
+            },
+            {
+              "id": "field-mime-new",
+              "name": "mime_type",
+              "value": "={{ $('Trigger - Duplicate Check Entry').item.json.mime_type || 'application/pdf' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bd9fc763-8761-4ee9-9ff2-2c0b64ac9f69",
+      "name": "Set - New Candidate",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4080,
+        -144
+      ],
+      "notes": "FIX: mode + includeOtherFields added. Returns is_duplicate=false + full candidate data back to parent workflow."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "90376bda-793c-4733-b99a-70985ca6cc72",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "3a3d8b14-6dc2-4e7f-990e-28387e53436b",
+              "leftValue": "={{ Object.keys($json).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3824,
+        -272
+      ],
+      "id": "e62c645e-284c-47ff-a4a8-681c3fc9976d",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "7d881166-c97a-414c-8ed6-0115985c2d9c",
+      "name": "Trigger - AI Screening Entry"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nfor (const item of $input.all()) {\n  item.json.myNewField = 1;\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        -272
+      ],
+      "id": "5ee5de9b-cd79-4996-a6c7-a0a845fca83f",
+      "name": "Trigger - Duplicate Check Entry"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Manual CV Intake": {
+      "main": [
+        [
+          {
+            "node": "Code - Parse Webhook Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parse Webhook Body": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Upload CV to Supabase Storage1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Set CV File URL": {
+      "main": [
+        [
+          {
+            "node": "Code - Prepare WF5 Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Handle Upload Error": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Log Upload Error1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Prepare WF5 Payload": {
+      "main": [
+        [
+          {
+            "node": "Trigger - AI Screening Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute - Call Workflow 5": {
+      "main": [
+        []
+      ]
+    },
+    "Code - Build Success Response": {
+      "main": [
+        [
+          {
+            "node": "Respond - Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code - Build Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Build Error Response": {
+      "main": [
+        [
+          {
+            "node": "Respond - Fatal Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Upload CV to Supabase Storage1": {
+      "main": [
+        [
+          {
+            "node": "Code - Set CV File URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Handle Upload Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Log Upload Error1": {
+      "main": [
+        [
+          {
+            "node": "Respond - Upload Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond - Fatal Error": {
+      "main": [
+        []
+      ]
+    },
+    "Set - Default Job Requirements": {
+      "main": [
+        [
+          {
+            "node": "Merge - Requirements Ready",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Set - Map Job Requirements": {
+      "main": [
+        [
+          {
+            "node": "Merge - Requirements Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge - Requirements Ready": {
+      "main": [
+        [
+          {
+            "node": "Code - Prepare CV for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Prepare CV for AI": {
+      "main": [
+        [
+          {
+            "node": "If - CV Data Ready1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If - Is Duplicate Application": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Update Existing Candidate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase - Insert New Candidate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Update Existing Candidate": {
+      "main": [
+        [
+          {
+            "node": "Set - Use Existing Candidate ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Use Existing Candidate ID": {
+      "main": [
+        [
+          {
+            "node": "Merge - Candidate ID Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Insert New Candidate": {
+      "main": [
+        [
+          {
+            "node": "Set - Use New Candidate ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Use New Candidate ID": {
+      "main": [
+        [
+          {
+            "node": "Merge - Candidate ID Ready",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge - Candidate ID Ready": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Insert CV Evaluation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Insert CV Evaluation": {
+      "main": [
+        [
+          {
+            "node": "Code - Screening Complete Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If - Has Job Post ID": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Get Job Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set - Default Job Requirements",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If - CV Data Ready1": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase - Log CV Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parse AI CV Response1": {
+      "main": [
+        [
+          {
+            "node": "Trigger - Duplicate Check Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Get Job Post": {
+      "main": [
+        [
+          {
+            "node": "Set - Map Job Requirements",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Code - Parse AI CV Response1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Screening Complete Summary": {
+      "main": [
+        [
+          {
+            "node": "Code - Build Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Generate Candidate Fingerprint": {
+      "main": [
+        [
+          {
+            "node": "If - Has Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If - Has Email": {
+      "main": [
+        [
+          {
+            "node": "Set - No Email Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase - Check Duplicate by Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Check Duplicate by Email": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Set - Duplicate Found",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set - New Candidate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - No Email Fallback": {
+      "main": [
+        [
+          {
+            "node": "If - Is Duplicate Application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Duplicate Found": {
+      "main": [
+        [
+          {
+            "node": "If - Is Duplicate Application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - New Candidate": {
+      "main": [
+        [
+          {
+            "node": "If - Is Duplicate Application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger - AI Screening Entry": {
+      "main": [
+        [
+          {
+            "node": "If - Has Job Post ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger - Duplicate Check Entry": {
+      "main": [
+        [
+          {
+            "node": "Code - Generate Candidate Fingerprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "74e9bf42-5cdf-4483-b994-479002b394f0",
+  "meta": {
+    "instanceId": "fc3412a0986fd9da2be403eaff9ca443fdab3b31644b356e92cd3a7b350bc54b"
+  },
+  "id": "gPh_R4VajuEkRpBPvGC6Q",
+  "tags": []
+}
